@@ -1,0 +1,26 @@
+{
+  // Configuración del Worker de Burrangulo (independiente de webcartaonline)
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "burrangulo",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-22",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "burrangulo-db",
+      "database_id": "b83b71be-08a1-4d2e-a372-b79403fbd826"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "FOTOS",
+      "bucket_name": "burrangulo-fotos"
+    }
+  ],
+  "observability": { "enabled": true }
+}

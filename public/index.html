@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Burrangulo · prueba de conexión</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:560px;margin:40px auto;padding:0 16px;color:#222}
+  input,button{font:inherit;padding:10px 12px;border-radius:8px;border:1px solid #bbb}
+  button{background:#222;color:#fff;border:0;cursor:pointer}
+  .oculto{display:none} li{margin:6px 0} small{color:#777}
+</style>
+</head>
+<body>
+  <h1>Burrangulo</h1>
+  <p><small>Página de prueba. Se sustituye por la app de verdad (index.html de Pisos Murcia).</small></p>
+
+  <div id="login">
+    <input id="clave" type="password" placeholder="Clave">
+    <button id="btnEntrar">Entrar</button>
+    <p id="error" style="color:#c00"></p>
+  </div>
+
+  <div id="app" class="oculto">
+    <p>✅ Conectado a Cloudflare. Abre esta página en otro dispositivo y verás los cambios en unos segundos.</p>
+    <input id="nombre" placeholder="Nombre de un piso de prueba">
+    <button id="btnAnadir">Añadir</button>
+    <ul id="lista"></ul>
+    <button id="btnSalir" style="background:#888">Salir</button>
+  </div>
+
+<script src="js/nube.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  function mostrar(dentro){ $("login").classList.toggle("oculto", dentro); $("app").classList.toggle("oculto", !dentro); if (dentro) Nube.escuchar(pintar); }
+  function pintar(d){
+    $("lista").innerHTML = "";
+    d.pisos.forEach(p => {
+      const li = document.createElement("li");
+      li.textContent = (p.nombre || "(sin nombre)") + " ";
+      const b = document.createElement("button"); b.textContent = "Borrar"; b.style.padding = "4px 8px";
+      b.onclick = () => Nube.borrarPiso(p.id);
+      li.appendChild(b); $("lista").appendChild(li);
+    });
+  }
+  Nube.alCambiarSesion(mostrar);
+  Nube.estaDentro().then(mostrar);
+  $("btnEntrar").onclick = async () => { try { $("error").textContent=""; await Nube.entrar($("clave").value); } catch(e){ $("error").textContent = e.message; } };
+  $("btnAnadir").onclick = async () => { const n = $("nombre").value.trim(); if (!n) return; await Nube.crearPiso({ nombre: n }); $("nombre").value=""; };
+  $("btnSalir").onclick = () => Nube.salir();
+</script>
+</body>
+</html>
