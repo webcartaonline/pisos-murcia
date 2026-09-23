@@ -17,12 +17,13 @@
   let ultimosDatos = null;
   let temporizador = null;
   let comprobando = false;
+  let otraVez = false;
 
   async function pedir(ruta, opciones = {}) {
     const r = await fetch("/api/" + ruta, { credentials: "same-origin", ...opciones });
     let cuerpo = null;
     try { cuerpo = await r.json(); } catch {}
-    if (r.status === 401) avisarSesion(false);
+    if (r.status === 401) { parar(); avisarSesion(false); }
     if (!r.ok) throw new Error((cuerpo && cuerpo.error) || "Error " + r.status);
     return cuerpo;
   }
@@ -53,20 +54,23 @@
 
   // --- sincronización ---
   async function comprobar(forzar = false) {
-    if (comprobando) return;
+    // si ya se está comprobando, se repite al terminar (así no se pierde ningún aviso)
+    if (comprobando) { otraVez = true; return; }
     comprobando = true;
     try {
       const { n } = await pedir("cambios");
       if (forzar || n !== ultimaVersion) {
+        const inicio = Date.now();
         const todo = await pedir("todo");
         ultimaVersion = todo.n;
         ultimosDatos = { pisos: todo.pisos, fotos: todo.fotos, ajustes: todo.ajustes };
-        oyentes.forEach((f) => { try { f(ultimosDatos); } catch (e) { console.error(e); } });
+        oyentes.forEach((f) => { try { f(ultimosDatos, { inicio }); } catch (e) { console.error(e); } });
       }
     } catch (e) {
       // sin conexión o sin sesión: se reintentará en el siguiente ciclo
     } finally {
       comprobando = false;
+      if (otraVez) { otraVez = false; comprobar(true); }
     }
   }
   function arrancar() {
@@ -102,6 +106,14 @@
       body: archivo,
     }));
   }
+  // subir una foto con un id elegido por la app (la app guarda la lista de ids en el piso)
+  function guardarFoto(fotoId, pisoId, archivo) {
+    return yRefrescar(pedir("fotos/" + encodeURIComponent(fotoId) + "?piso=" + encodeURIComponent(pisoId), {
+      method: "PUT",
+      headers: { "Content-Type": archivo.type || "image/jpeg" },
+      body: archivo,
+    }));
+  }
   const borrarFoto = (fotoId) => yRefrescar(pedir("fotos/" + encodeURIComponent(fotoId), { method: "DELETE" }));
   const ordenarFotos = (pisoId, ids) =>
     yRefrescar(enviar("pisos/" + encodeURIComponent(pisoId) + "/fotos/orden", "PUT", { ids }));
@@ -125,7 +137,7 @@
     entrar, salir, estaDentro, alCambiarSesion,
     escuchar, refrescar: () => comprobar(true),
     crearPiso, guardarPiso, actualizarPiso, borrarPiso,
-    subirFoto, borrarFoto, ordenarFotos, comprimirFoto,
+    subirFoto, guardarFoto, borrarFoto, ordenarFotos, comprimirFoto,
     leerAjuste, guardarAjuste,
   };
 })();

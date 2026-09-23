@@ -1,8 +1,5 @@
-// Pisos Murcia — app con sincronización en tiempo real (Firebase)
-import { firebaseConfig } from './config.js';
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js';
-import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, sendPasswordResetEmail, signOut, connectAuthEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js';
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, getDoc, connectFirestoreEmulator } from 'https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js';
+// Pisos Murcia — app con sincronización (Cloudflare: Worker + D1 + R2, ver js/nube.js)
+const Nube=window.Nube;
 
 const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -38,25 +35,21 @@ const TOWNS={'Murcia':[37.9834,-1.1299],'Cartagena':[37.6057,-0.9863],'Lorca':[3
 const BOUNDS=[[37.36,-2.36],[38.77,-0.62]];
 const DEFAULT_STATUSES=[{id:'s1',name:'Nuevo',color:'red'},{id:'s2',name:'Contactado',color:'salmon'},{id:'s3',name:'En curso',color:'ink'},{id:'s4',name:'Visitado',color:'deep'},{id:'s5',name:'Descartado',color:'pale'}];
 
-/* ============ FIREBASE ============ */
+/* ============ NUBE (Cloudflare) ============ */
 const gate=$('#gate');
-const configured=firebaseConfig&&firebaseConfig.apiKey&&!/PEGA_AQUI/.test(firebaseConfig.apiKey+firebaseConfig.projectId);
-const useEmu=/^(localhost|127\.0\.0\.1)$/.test(location.hostname)&&new URLSearchParams(location.search).has('emu');
-let app,auth,db;
-if(configured||useEmu){
- app=initializeApp(configured?firebaseConfig:{apiKey:'demo-key',authDomain:'demo-pisos.firebaseapp.com',projectId:'demo-pisos',appId:'demo'});
- auth=getAuth(app);
- db=initializeFirestore(app,{localCache:persistentLocalCache({tabManager:persistentMultipleTabManager()})});
- if(useEmu){connectAuthEmulator(auth,'http://127.0.0.1:9099',{disableWarnings:true});connectFirestoreEmulator(db,'127.0.0.1',8080)}
-}
-const pRef=id=>doc(db,'pisos',id);
-const fRef=id=>doc(db,'fotos',id);
-const stRef=()=>doc(db,'ajustes','estados');
-const errW=e=>{console.error(e);toast(e?.code==='permission-denied'?'Sin permiso para guardar':'No se pudo guardar: '+(e?.message||e))};
+const fotoURL=id=>'/api/fotos/'+encodeURIComponent(id);
+// Los cambios se envían de uno en uno (en cola) para que nunca se pisen entre sí
+let pend=0,needRefresh=false,lastDone=0,cola=Promise.resolve();
+function enCola(fn){pend++;setSync();const pr=cola.then(fn);cola=pr.catch(()=>{});return pr.finally(()=>{pend--;lastDone=Date.now();if(!pend){setSync();if(needRefresh){needRefresh=false;Nube.refrescar()}}})}
+const errW=e=>{console.error(e);const m=e?.message||String(e);toast(/sesi/i.test(m)?'La sesión ha caducado: vuelve a entrar':/fetch|network|red/i.test(m)?'Sin conexión: no se pudo guardar':'No se pudo guardar: '+m)};
 const clean=p=>{const o={...p};delete o.id;return o};
-function upd(id,fields){const p=pisoOf(id);fields={...fields,updated:Date.now()};if(p)Object.assign(p,fields);updateDoc(pRef(id),fields).catch(errW)}
-function putPiso(p){setDoc(pRef(p.id),clean({...p,updated:Date.now()})).catch(errW)}
-function saveStatuses(){setDoc(stRef(),{list:S.statuses}).catch(errW)}
+function upd(id,fields){const p=pisoOf(id);fields={...fields,updated:Date.now()};if(p)Object.assign(p,fields);enCola(()=>Nube.actualizarPiso(id,fields)).catch(errW)}
+function putPiso(p){const d=clean({...p,updated:Date.now()});enCola(()=>Nube.guardarPiso(p.id,d)).catch(errW)}
+function delPisoNube(id){enCola(()=>Nube.borrarPiso(id)).catch(errW)}
+function saveStatuses(){const list=S.statuses.map(s=>({...s}));enCola(()=>Nube.guardarAjuste('estados',{list})).catch(errW)}
+function dataToBlob(src){const [h,b]=src.split(',');const bin=atob(b);const a=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);return new Blob([a],{type:(h.match(/data:([^;]+)/)||[])[1]||'image/jpeg'})}
+function subirFotoNube(id,pisoId,src){enCola(()=>Nube.guardarFoto(id,pisoId,dataToBlob(src))).catch(errW)}
+function borrarFotoNube(id){enCola(()=>Nube.borrarFoto(id)).catch(()=>{})}
 
 /* ============ ESTADO ============ */
 const S={pisos:[],statuses:DEFAULT_STATUSES.map(s=>({...s}))};
@@ -69,7 +62,7 @@ const kfmt=n=>n>=1e6?(n/1e6).toFixed(2).replace('.',',')+'M':Math.round(n/1000)+
 const stOf=id=>S.statuses.find(s=>s.id===id)||S.statuses[0];
 const pisoOf=id=>S.pisos.find(p=>p.id===id);
 const col=s=>COLORS[s?.color]||COLORS.ink;
-const norm=d=>{const p={id:d.id,...d.data()};p.links=p.links||[];p.photos=p.photos||[];p.notes=p.notes||'';p.visit=p.visit||'';p.cover=p.cover||'';return p};
+const norm=d=>{const p={...d};delete p._creado;delete p._actualizado;p.links=p.links||[];p.photos=p.photos||[];p.notes=p.notes||'';p.visit=p.visit||'';p.cover=p.cover||'';return p};
 function portalOf(u){try{const h=new URL(u).hostname.replace('www.','');
  if(/idealista/.test(h))return{name:'Idealista',ab:'id',ad:1};if(/fotocasa/.test(h))return{name:'Fotocasa',ab:'fc',ad:1};if(/habitaclia/.test(h))return{name:'Habitaclia',ab:'hb',ad:1};if(/pisos\.com/.test(h))return{name:'Pisos.com',ab:'pc',ad:1};
  if(/google\.[a-z.]+$/.test(h)&&/maps/.test(u)||/goo\.gl|maps\.app/.test(h))return{name:'Google Maps',ab:'gm',maps:1};return{name:h,ab:h.slice(0,2)}}catch(e){return null}}
@@ -79,15 +72,16 @@ function fmtVisit(v){const d=new Date(v);return d.toLocaleDateString('es-ES',{we
 
 /* ============ FOTOS ============ */
 const photoCache=new Map();
-function getPhoto(id){if(!photoCache.has(id)){const pr=getDoc(fRef(id)).then(s=>s.exists()?s.data().src:null).catch(()=>null);photoCache.set(id,pr);pr.then(v=>{if(!v)photoCache.delete(id)})}return Promise.resolve(photoCache.get(id))}
-const cachedSrc=id=>{const v=photoCache.get(id);return typeof v==='string'?v:''};
-function imgHTML(id){const s=cachedSrc(id);return `<img data-ph="${esc(id)}" ${s?`src="${s}"`:''} alt="">`}
-function hydrate(root){$$('img[data-ph]:not([src])',root).forEach(async img=>{const id=img.dataset.ph;const src=await getPhoto(id);if(src){photoCache.set(id,src);img.src=src}else{img.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'Foto no disponible'}))}})}
+function getPhoto(id){const v=photoCache.get(id);return Promise.resolve(typeof v==='string'?v:fotoURL(id))}
+async function photoData(id){const v=photoCache.get(id);if(typeof v==='string'&&v.startsWith('data:'))return v;try{const r=await fetch(fotoURL(id),{credentials:'same-origin'});if(!r.ok)return null;const b=await r.blob();return await new Promise(res=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=()=>res(null);fr.readAsDataURL(b)})}catch(e){return null}}
+const cachedSrc=id=>{const v=photoCache.get(id);return typeof v==='string'?v:fotoURL(id)};
+function imgHTML(id){return `<img data-ph="${esc(id)}" src="${cachedSrc(id)}" alt="" onerror="this.outerHTML='<div class=&quot;ph&quot;>Foto no disponible</div>'">`}
+function hydrate(root){}
 function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=src})}
 function toJpeg(img,max,q){const k=Math.min(1,max/Math.max(img.width,img.height)),c=document.createElement('canvas');c.width=Math.round(img.width*k);c.height=Math.round(img.height*k);c.getContext('2d').drawImage(img,0,0,c.width,c.height);return c.toDataURL('image/jpeg',q)}
 async function fileToData(file){const url=URL.createObjectURL(file);try{const img=await loadImg(url);let q=.78,max=1400,out=toJpeg(img,max,q);while(out.length>900000&&q>.35){q-=.1;if(q<.5)max=1100;out=toJpeg(img,max,q)}return out}catch(e){return null}finally{URL.revokeObjectURL(url)}}
 async function makeThumb(src){if(!src)return '';try{return toJpeg(await loadImg(src),560,.62)}catch(e){return ''}}
-function storePhoto(pisoId,src){const id=uid();photoCache.set(id,src);setDoc(fRef(id),{src,piso:pisoId,created:Date.now()}).catch(errW);return id}
+function storePhoto(pisoId,src){const id=uid();photoCache.set(id,src);subirFotoNube(id,pisoId,src);return id}
 async function coverFor(ids){return ids.length?makeThumb(await getPhoto(ids[0])):''}
 
 /* ============ INICIO ============ */
@@ -172,8 +166,8 @@ function closeSheet(w){w=w||$$('.sheet-wrap').pop();if(!w)return;w.classList.rem
 const shHd=t=>`<div class="sh-hd"><h3>${t}</h3><button class="ibtn" data-a="closeSheet" aria-label="Cerrar">${I('x')}</button></div>`;
 
 /* CUENTA */
-function accountSheet(){const u=auth.currentUser;const e=u?.email||'';
- openSheet(shHd('Cuenta')+`<div class="sh-body"><div class="acc"><span class="av">${esc((e[0]||'?').toUpperCase())}</span><span><b>${esc(e)}</b><small id="accsync">${syncState==='off'?'Sin conexión: los cambios se guardan en este dispositivo y se enviarán al volver la conexión.':syncState==='pend'?'Enviando cambios…':'Todo sincronizado. Los cambios aparecen al instante en los demás dispositivos.'}</small></span></div>
+function accountSheet(){
+ openSheet(shHd('Cuenta')+`<div class="sh-body"><div class="acc"><span class="av">${I('user','s')}</span><span><b>Sesión iniciada</b><small id="accsync">${syncState==='off'?'Sin conexión: los cambios no se guardarán hasta que vuelva internet.':syncState==='pend'?'Enviando cambios…':'Todo sincronizado. Los cambios aparecen en unos segundos en los demás dispositivos.'}</small></span></div>
  <p class="hint">Para tenerla como app en el móvil: en Android (Chrome) menú ⋮ → «Añadir a pantalla de inicio»; en iPhone (Safari) botón Compartir → «Añadir a pantalla de inicio».</p>
  <button class="btn btn-secondary btn-block danger" data-a="logout">${I('logout','s')}Cerrar sesión</button></div>`)}
 
@@ -249,7 +243,7 @@ async function saveForm(){const f=form;if(!f.title.trim()){toast('Añade un tít
  if(firstChanged||!old||!old.cover){const first=f.photos[0];data.cover=first?await makeThumb(first.src||await getPhoto(first.id)):''}
  if(f.editing){if(old)upd(f.id,data);else putPiso({...data,id:f.id,fav:f.fav,notes:f.notes,visit:f.visit,created:f.created})}
  else{const p={id:f.id,...data,fav:false,notes:'',visit:'',created:f.created};S.pisos.push(p);putPiso(p)}
- removed.forEach(id=>{photoCache.delete(id);deleteDoc(fRef(id)).catch(()=>{})});
+ removed.forEach(id=>{photoCache.delete(id);borrarFotoNube(id)});
  const ed=f.editing;closeSheet();refresh();if(ed&&ui.detail)renderDetail(true);toast(ed?'Cambios guardados':'Piso guardado')}
 
 /* ============ MAPA ============ */
@@ -300,7 +294,7 @@ function act(a,el,e){const id=el.dataset.id;const p=id&&pisoOf(id);
  case 'add':if(pickMode)return;formSheet();break;
  case 'theme':{const cur=document.documentElement.dataset.theme;const nt=cur==='dark'?'light':'dark';try{localStorage.setItem('pisos-theme',nt)}catch(e){}document.documentElement.dataset.theme=nt;renderHomeKeep();break}
  case 'account':accountSheet();break;
- case 'logout':closeSheet();signOut(auth);break;
+ case 'logout':closeSheet();Nube.salir().catch(()=>{});break;
  case 'statuses':stEdit=null;stDel=null;statusSheet();break;
  case 'filter':ui.filter=el.dataset.f;renderHome();break;
  case 'sort':ui.sort=(ui.sort+1)%SORTS.length;renderHome();break;
@@ -313,16 +307,16 @@ function act(a,el,e){const id=el.dataset.id;const p=id&&pisoOf(id);
  case 'setStatus':upd(ui.detail,{status:el.dataset.s});renderDetail(true);refresh(false);break;
  case 'addPhotos':photoSheet(photoTarget);break;
  case 'cover':(async()=>{const q=pisoOf(ui.detail);const ph=[...q.photos];const [f]=ph.splice(ui.gi,1);ph.unshift(f);ui.gi=0;upd(q.id,{photos:ph,cover:await coverFor(ph)});renderDetail(true);refresh(false);toast('Nueva portada')})();break;
- case 'delPhoto':(async()=>{const q=pisoOf(ui.detail);const gi=ui.gi;const ph=[...q.photos];const [fid]=ph.splice(gi,1);const src=await getPhoto(fid);const oldCover=q.cover;
-  upd(q.id,{photos:ph,...(gi===0?{cover:await coverFor(ph)}:{})});deleteDoc(fRef(fid)).catch(()=>{});renderDetail(true);refresh(false);
-  toast('Foto eliminada','Deshacer',()=>{const r=pisoOf(q.id);if(!r)return;if(src){photoCache.set(fid,src);setDoc(fRef(fid),{src,piso:q.id,created:Date.now()}).catch(errW)}const a=[...r.photos];a.splice(gi,0,fid);upd(q.id,{photos:a,...(gi===0?{cover:oldCover}:{})});if(ui.detail===q.id)renderDetail(true);refresh(false)})})();break;
+ case 'delPhoto':(async()=>{const q=pisoOf(ui.detail);const gi=ui.gi;const ph=[...q.photos];const [fid]=ph.splice(gi,1);const src=await photoData(fid);const oldCover=q.cover;
+  upd(q.id,{photos:ph,...(gi===0?{cover:await coverFor(ph)}:{})});borrarFotoNube(fid);renderDetail(true);refresh(false);
+  toast('Foto eliminada','Deshacer',()=>{const r=pisoOf(q.id);if(!r)return;if(src){photoCache.set(fid,src);subirFotoNube(fid,q.id,src)}const a=[...r.photos];a.splice(gi,0,fid);upd(q.id,{photos:a,...(gi===0?{cover:oldCover}:{})});if(ui.detail===q.id)renderDetail(true);refresh(false)})})();break;
  case 'addLink':{const v=$('#newLink').value.trim();if(!/^https?:\/\//.test(v)){toast('Pega un enlace válido');return}const q=pisoOf(ui.detail);const f={links:[...q.links,v]};const c=portalOf(v)?.maps&&coordsFrom(v);if(c){f.lat=c[0];f.lng=c[1];toast('Ubicación actualizada desde Maps')}upd(q.id,f);renderDetail(true);refresh(false);break}
  case 'delLink':{e.preventDefault();e.stopPropagation();const q=pisoOf(ui.detail);const l=[...q.links];l.splice(+el.dataset.i,1);upd(q.id,{links:l});renderDetail(true);refresh(false);break}
  case 'mort':ui.mort[el.dataset.k]=+el.dataset.v;try{localStorage.setItem('pisos-mort',JSON.stringify(ui.mort))}catch(e){}renderDetail(true);break;
  case 'onMap':{const q=pisoOf(ui.detail);closeDetail();switchTab('map');ui.sel=q.id;setTimeout(()=>{if(!mapVisible().includes(q)){ui.mf={st:[],max:400000,rooms:0,fav:false}}updateMarkers();renderMapFoot();map.flyTo([q.lat,q.lng],15,{duration:.9})},120);break}
- case 'delPiso':(async()=>{const q=pisoOf(ui.detail);if(!q)return;const srcs=await Promise.all(q.photos.map(getPhoto));const i=S.pisos.indexOf(q);
-  S.pisos.splice(i,1);deleteDoc(pRef(q.id)).catch(errW);q.photos.forEach(fid=>deleteDoc(fRef(fid)).catch(()=>{}));closeDetail();if(ui.sel===q.id)ui.sel=null;refresh(false);renderMapFoot();
-  toast('Piso eliminado','Deshacer',()=>{q.photos.forEach((fid,j)=>{if(srcs[j]){photoCache.set(fid,srcs[j]);setDoc(fRef(fid),{src:srcs[j],piso:q.id,created:Date.now()}).catch(errW)}});q.photos=q.photos.filter((_,j)=>srcs[j]);S.pisos.push(q);putPiso(q);refresh(false)})})();break;
+ case 'delPiso':(async()=>{const q=pisoOf(ui.detail);if(!q)return;const srcs=await Promise.all(q.photos.map(photoData));const i=S.pisos.indexOf(q);
+  S.pisos.splice(i,1);delPisoNube(q.id);closeDetail();if(ui.sel===q.id)ui.sel=null;refresh(false);renderMapFoot();
+  toast('Piso eliminado','Deshacer',()=>{q.photos.forEach((fid,j)=>{if(srcs[j]){photoCache.set(fid,srcs[j]);subirFotoNube(fid,q.id,srcs[j])}});q.photos=q.photos.filter((_,j)=>srcs[j]);S.pisos.push(q);putPiso(q);refresh(false)})})();break;
  case 'closeSheet':if(pickMode)return;closeSheet(el.closest('.sheet-wrap'));break;
  case 'stNew':stEdit={isNew:true,id:uid(),name:'',color:'grey'};stDel=null;renderStatusBody();break;
  case 'stEdit':stEdit={...S.statuses.find(s=>s.id===id)};stDel=null;renderStatusBody();break;
@@ -362,8 +356,8 @@ $('#app').addEventListener('change',e=>{const t=e.target;if(t.dataset.d&&ui.deta
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){if($$('.sheet-wrap').length&&!pickMode)closeSheet();else if(ui.detail)closeDetail()}});
 
 /* ============ DATOS EN TIEMPO REAL ============ */
-function setSync(meta){const s=!navigator.onLine?'off':meta.hasPendingWrites?'pend':meta.fromCache?'off':'ok';if(s===syncState)return;syncState=s;const l=$('#syncl');if(l)l.innerHTML=s==='off'?'<span class="sync off"><i></i>Sin conexión</span>':s==='pend'?'<span class="sync pend"><i></i>Guardando…</span>':'<span class="sync"><i></i>Sincronizado</span>'}
-addEventListener('online',()=>setSync({}));addEventListener('offline',()=>setSync({}));
+function setSync(){const s=!navigator.onLine?'off':pend?'pend':'ok';if(s===syncState)return;syncState=s;const l=$('#syncl');if(l)l.innerHTML=s==='off'?'<span class="sync off"><i></i>Sin conexión</span>':s==='pend'?'<span class="sync pend"><i></i>Guardando…</span>':'<span class="sync"><i></i>Sincronizado</span>'}
+addEventListener('online',()=>{setSync();Nube.refrescar()});addEventListener('offline',()=>setSync());
 function onData(){
  if(!ready){if(!(loaded.pisos&&loaded.st))return;ready=true;gate.hidden=true;renderHome(true);handleShare();return}
  renderHomeKeep();updateMarkers();if(ui.sel){if(pisoOf(ui.sel))renderMapFoot();else{ui.sel=null;renderMapFoot()}}
@@ -371,18 +365,17 @@ function onData(){
  if($('#stbody')&&!stEdit&&!stDel)renderStatusBody();
  if(form&&!form.editing)renderFormParts();
 }
-function listen(){
- unsub.push(onSnapshot(collection(db,'pisos'),{includeMetadataChanges:true},snap=>{
-  setSync(snap.metadata);
-  if(snap.docChanges().length||!loaded.pisos){S.pisos=snap.docs.map(norm);loaded.pisos=true;onData()}
- },dataError));
- unsub.push(onSnapshot(stRef(),snap=>{
-  if(snap.exists()&&Array.isArray(snap.data().list)&&snap.data().list.length){S.statuses=snap.data().list}
-  else if(!snap.metadata.fromCache){setDoc(stRef(),{list:DEFAULT_STATUSES}).catch(()=>{})}
-  loaded.st=true;onData();
- },dataError));
+// Nube avisa cada vez que hay datos nuevos en Cloudflare (mira cada 3 segundos)
+function recibir(d,info){
+ if(pend>0){needRefresh=true;return}                        // hay cambios nuestros enviándose: esperar
+ if(info&&info.inicio<lastDone){Nube.refrescar();return}     // datos pedidos antes de nuestro último cambio: pedir otra vez
+ S.pisos=(d.pisos||[]).map(norm);
+ const st=d.ajustes&&d.ajustes.estados;
+ if(st&&Array.isArray(st.list)&&st.list.length)S.statuses=st.list;
+ else if(!loaded.st){S.statuses=DEFAULT_STATUSES.map(s=>({...s}));saveStatuses()}
+ loaded.pisos=true;loaded.st=true;setSync();onData();
 }
-function dataError(e){console.error(e);if(e.code==='permission-denied')showGate('denied');else toast('Error de conexión: '+e.message)}
+function listen(){unsub.push(Nube.escuchar(recibir))}
 function stopListening(){unsub.forEach(f=>f());unsub=[];loaded={pisos:false,st:false};ready=false;S.pisos=[];closeDetail();$$('.sheet-wrap').forEach(w=>w.remove())}
 function handleShare(){const q=new URLSearchParams(location.search);const txt=[q.get('url'),q.get('text'),q.get('title')].filter(Boolean).join(' ');const m=txt.match(/https?:\/\/\S+/);if(!m)return;history.replaceState(null,'',location.pathname);formSheet();addFormLink(m[0])}
 
@@ -390,22 +383,19 @@ function handleShare(){const q=new URLSearchParams(location.search);const txt=[q
 const logo=`<div class="gate-logo">${I('home')}</div>`;
 function showGate(kind,msg=''){gate.hidden=false;const c=gate.firstElementChild;
  if(kind==='loading')c.innerHTML='<i class="spin"></i>';
- else if(kind==='setup')c.innerHTML=`${logo}<h1>Falta un paso</h1><p>La app todavía no está conectada a la base de datos. Abre el archivo <code>js/config.js</code> y pega ahí la configuración de tu proyecto de Firebase (lo explica el archivo <code>LEEME.md</code>).</p>`;
- else if(kind==='denied')c.innerHTML=`${logo}<h1>Sin acceso</h1><p>La cuenta <b>${esc(auth.currentUser?.email||'')}</b> no tiene permiso para ver estos pisos. Pide que la añadan a la lista de correos permitidos (reglas de Firestore).</p><button class="btn btn-primary" id="gOut">Salir</button>`;
- else c.innerHTML=`${logo}<h1>Mis pisos</h1><p>Entra con tu correo y contraseña. Los datos se comparten y se actualizan al momento en todos tus dispositivos.</p>
+ else c.innerHTML=`${logo}<h1>Mis pisos</h1><p>Escribe la clave para entrar. Los datos se comparten y se actualizan en unos segundos en todos vuestros dispositivos.</p>
   ${msg?`<div class="err">${esc(msg)}</div>`:''}
-  <form id="gForm"><div class="field"><input class="input" type="email" id="gEmail" placeholder="Correo" autocomplete="username" required></div>
-  <div class="field"><input class="input" type="password" id="gPass" placeholder="Contraseña" autocomplete="current-password" required></div>
-  <button class="btn btn-primary" type="submit" id="gBtn">Entrar</button></form>
-  <button class="link" id="gReset">He olvidado la contraseña</button>`;
- $('#gOut')?.addEventListener('click',()=>signOut(auth));
- const f=$('#gForm');if(f){try{$('#gEmail').value=localStorage.getItem('pisos-email')||''}catch(e){}
-  f.onsubmit=async ev=>{ev.preventDefault();const em=$('#gEmail').value.trim(),pw=$('#gPass').value;$('#gBtn').disabled=true;$('#gBtn').textContent='Entrando…';
-   try{try{localStorage.setItem('pisos-email',em)}catch(e){}await signInWithEmailAndPassword(auth,em,pw)}catch(e){showGate('login',authMsg(e))}};
-  $('#gReset').onclick=async()=>{const em=$('#gEmail').value.trim();if(!em){showGate('login','Escribe primero tu correo arriba.');return}
-   try{await sendPasswordResetEmail(auth,em);showGate('login','Te hemos enviado un correo para crear una contraseña nueva (mira también en spam).')}catch(e){showGate('login',authMsg(e))}}}
+  <form id="gForm"><input type="text" name="username" value="burrangulo" autocomplete="username" hidden>
+  <div class="field"><input class="input" type="password" id="gPass" placeholder="Clave" autocomplete="current-password" required></div>
+  <button class="btn btn-primary" type="submit" id="gBtn">Entrar</button></form>`;
+ const f=$('#gForm');if(f){$('#gPass').focus();
+  f.onsubmit=async ev=>{ev.preventDefault();const pw=$('#gPass').value;$('#gBtn').disabled=true;$('#gBtn').textContent='Entrando…';
+   try{await Nube.entrar(pw)}catch(e){showGate('login',authMsg(e))}}}
 }
-function authMsg(e){const c=e?.code||'';if(/invalid-credential|wrong-password|user-not-found|invalid-email/.test(c))return 'Correo o contraseña incorrectos.';if(/too-many-requests/.test(c))return 'Demasiados intentos. Espera unos minutos.';if(/network/.test(c))return 'Sin conexión a internet.';return 'No se pudo entrar ('+c+').'}
+function authMsg(e){const m=e?.message||'';if(/incorrecta/i.test(m))return 'Clave incorrecta.';if(/fetch|network|load failed/i.test(m))return 'Sin conexión a internet.';return m||'No se pudo entrar.'}
 
-if(!auth){showGate('setup')}
-else onAuthStateChanged(auth,u=>{stopListening();if(u){showGate('loading');listen()}else showGate('login')});
+let dentro=null;
+function cambioSesion(d){if(d===dentro)return;dentro=d;stopListening();if(d){showGate('loading');listen()}else showGate('login')}
+showGate('loading');
+Nube.alCambiarSesion(cambioSesion);
+Nube.estaDentro().then(cambioSesion);

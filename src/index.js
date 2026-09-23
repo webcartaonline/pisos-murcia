@@ -200,6 +200,25 @@ async function api(request, env, url) {
   if (partes[0] === "fotos" && partes[1]) {
     const fotoId = partes[1];
     if (!validoId(fotoId)) return json({ error: "Id no válido" }, 400);
+
+    // PUT /api/fotos/:id?piso=PISO -> guardar una foto con un id elegido por la app
+    if (metodo === "PUT") {
+      const pisoId = url.searchParams.get("piso");
+      if (!validoId(pisoId)) return json({ error: "Falta el piso" }, 400);
+      const tipo = (request.headers.get("Content-Type") || "image/jpeg").split(";")[0].trim();
+      if (!tipo.startsWith("image/")) return json({ error: "Solo se admiten imágenes" }, 400);
+      const cuerpo = await request.arrayBuffer();
+      if (!cuerpo.byteLength) return json({ error: "La foto está vacía" }, 400);
+      if (cuerpo.byteLength > MAX_FOTO) return json({ error: "La foto pesa demasiado (máx. 10 MB)" }, 413);
+      const clave = `pisos/${pisoId}/${fotoId}`;
+      await env.FOTOS.put(clave, cuerpo, { httpMetadata: { contentType: tipo } });
+      await db.prepare(
+        `INSERT INTO fotos (id, piso_id, clave, tipo, orden, creado) VALUES (?, ?, ?, ?, 0, ?)
+         ON CONFLICT(id) DO UPDATE SET piso_id = excluded.piso_id, clave = excluded.clave, tipo = excluded.tipo`
+      ).bind(fotoId, pisoId, clave, tipo, Date.now()).run();
+      return json({ ok: true, id: fotoId, url: `/api/fotos/${fotoId}` });
+    }
+
     const fila = await db.prepare("SELECT clave, tipo FROM fotos WHERE id = ?").bind(fotoId).first();
     if (!fila) return json({ error: "Esa foto no existe" }, 404);
 
