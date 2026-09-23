@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Correos que pueden ver y editar los pisos (en minúsculas).
+    // Cambia estos dos por el tuyo y el de tu hermano.
+    function permitido() {
+      return request.auth != null
+        && request.auth.token.email in [
+          'piambacamilo22@gmail.com',
+          'CORREO_DE_TU_HERMANO@gmail.com'
+        ];
+    }
+
+    match /{document=**} {
+      allow read, write: if permitido();
+    }
+  }
+}
